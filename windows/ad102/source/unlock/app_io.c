@@ -105,7 +105,30 @@ EFI_STATUS GuIoOpen(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
   status=Table->BootServices->HandleProtocol(loaded->DeviceHandle,&FsGuid,(VOID **)&fs);
   if(EFI_ERROR(status) || !fs)return EFI_UNSUPPORTED;
   status=fs->OpenVolume(fs,&Root);if(EFI_ERROR(status) || !Root)return EFI_DEVICE_ERROR;
+  BOOLEAN esp=GuLocalEsp(loaded->DeviceHandle);
   status=Root->Open(Root,&Parent,L"\\RTX4090-UNLOCK",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
+  if(status==EFI_NOT_FOUND && esp) {
+    /* ESP boot: the ESP only holds the loader; the payload volume keeps the
+       work tree. Mirror PreloadWindows: find it by its pinned GUID. */
+    EFI_HANDLE *hs=NULL;UINTN n=0;
+    status=Table->BootServices->LocateHandleBuffer(ByProtocol,&FsGuid,NULL,&n,&hs);
+    if(EFI_ERROR(status) || !hs || n>256)return EFI_NOT_FOUND;
+    for(UINTN i=0;i<n;i++) {
+      if(!GuPayloadEsp(hs[i]))continue;
+      EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *pfs=NULL;EFI_FILE_PROTOCOL *proot=NULL;
+      EFI_STATUS x=Table->BootServices->HandleProtocol(hs[i],&FsGuid,(VOID **)&pfs);
+      if(EFI_ERROR(x) || !pfs)continue;
+      x=pfs->OpenVolume(pfs,&proot);if(EFI_ERROR(x) || !proot)continue;
+      EFI_FILE_PROTOCOL *pparent=NULL;
+      x=proot->Open(proot,&pparent,L"\\RTX4090-UNLOCK",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
+      if(EFI_ERROR(x) || !pparent) {x=proot->Close(proot);continue;}
+      /* The load volume's root is no longer needed; close it before adopting
+         the payload root so GuIoClose never touches a stale handle. */
+      Root->Close(Root);Root=proot;Parent=pparent;status=EFI_SUCCESS;break;
+    }
+    Table->BootServices->FreePool(hs);
+    if(EFI_ERROR(status))return EFI_NOT_FOUND;
+  }
   if(EFI_ERROR(status) || !Parent)return EFI_NOT_FOUND;
   status=Metadata(Parent,TRUE,0);if(EFI_ERROR(status))return status;
   for(UINTN slot=0;slot<100;slot++) {
