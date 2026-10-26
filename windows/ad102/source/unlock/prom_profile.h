@@ -5,5 +5,7 @@
  * its correspondence to BAR0+0x300000 is not assumed to be hardware-tested. */
 #define GU_PROM_BAR_OFFSET 0x300000U
 #define GU_PROM_VIEW_BYTES 0xd6c00U
-#define GU_PROM_VIEW_SHA256 "18a54e8d9e0ec61778cf275f6d3438c6d1d46d94fa558bb6541b65476305f22a"
+/* Our box: sha256 of 4090-expansion-view.bin (paso0/), verified byte-identical
+ * to the live UEFI PROM read at BAR0+0x300000 (CAP0002 physical_prom). */
+#define GU_PROM_VIEW_SHA256 "11a0c20001c5e09682ab16de34df766cfdce6dad481d25d37ca0f2904a484f72"
 #endif

@@ -83,8 +83,9 @@ static BOOLEAN DisplayCheck(VOID) {
       status=Gu.bs->HandleProtocol(parent,&PciGuid,(VOID**)&other);
       if(EFI_ERROR(status) || !other || others>=8){GuLog("display substep=parent-pci parent=%#zx status=%#llx others=%zu\n",(size_t)parent,(unsigned long long)status,others);status=EFI_UNSUPPORTED;break;}
       status=other->Pci.Read(other,EfiPciIoWidthUint32,0,1,&id);
-      /* The only independent physical display devices on this machine. */
-      if(EFI_ERROR(status) || id!=0xe2128086U){status=EFI_UNSUPPORTED;break;}
+      /* The only independent physical display device on this machine:
+       * AMD iGPU of the 7950X, 1002:164E (verified sole GOP, CAP0002). */
+      if(EFI_ERROR(status) || id!=0x164e1002U){status=EFI_UNSUPPORTED;break;}
       OTHER_DISPLAY *s=&snapshot[others++];
       s->handle=handles[i];s->parent=parent;s->gop=g;
       s->base=g->Mode->FrameBufferBase;s->size=g->Mode->FrameBufferSize;
@@ -268,7 +269,7 @@ static VOID LogHash(const char *Name,const VOID *Data,UINTN Bytes) {
 }
 static EFI_STATUS PromCheck(VOID) {
   if(!Gu.pci->RomImage || Gu.pci->RomSize!=0x24a00 ||
-     !GuHashMatches(Gu.pci->RomImage,0x24a00,"a6b431683699d4887126515a2147fe2f9d9f9b48372e84ab166906745a51e2f2"))return EFI_CRC_ERROR;
+     !GuHashMatches(Gu.pci->RomImage,0x24a00,"aa98ed57dafd375c7fe01dc2962f495f2a3bfdb9199d917b393ee89830d68f2f"))return EFI_CRC_ERROR;
   VOID *prom=GuAlloc(1048576);if(!prom)return EFI_OUT_OF_RESOURCES;
   GuCopyFromIo(prom,(VOID *)(UINTN)(Gu.bar_base+GU_PROM_BAR_OFFSET),1048576);
   BOOLEAN good=!Gu.fault && GuHashMatches(prom,GU_PROM_VIEW_BYTES,GU_PROM_VIEW_SHA256);
@@ -281,7 +282,7 @@ static EFI_STATUS PromCheck(VOID) {
     UINT32 *p=prom;
     GuLog("PROM prefix: %08x %08x %08x %08x %08x %08x %08x %08x\n",p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
     LogHash("PROM UEFI slice +0",prom,0x24a00);
-    LogHash("PROM FWSEC image +0x44168",(UINT8 *)prom+0x44168,0x10000);
+    LogHash("PROM FWSEC image +0x450ec",(UINT8 *)prom+0x450ec,0x10000);
     EFI_STATUS saved=GuSavePromDump(prom,1048576);
     GuLog("PROM.BIN save status=%#llx bytes=1048576 complete_read=%u; mismatch remains blocking\n",
       (unsigned long long)saved,(unsigned)!Gu.fault);

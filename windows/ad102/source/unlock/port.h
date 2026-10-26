@@ -1,4 +1,7 @@
-/* Modified 2026-10-21: experimental AD103 32GB GA102-pair port; see PORT-NOTES.txt. */
+/* Modified 2026-10-26: local port for our box (ASUS ROG CROSSHAIR X670E HERO
+ * BIOS 3902, NVIDIA FE 4090 subsys 10de:165b rev A1, UEFI BDF 01:00.0).
+ * Identity and chip verified by AD104-PROBE CAP0002 (identity=True,
+ * PMC_BOOT_0=0x192000a1); see E:/_SCRIPTS/gpu-unlock/paso0/REPORT.md. */
 #pragma once
 #include <Uefi.h>
 #include <Protocol/PciIo.h>
@@ -6,10 +9,10 @@
 #include <stddef.h>
 
 #define GU_BOARD_ID 0x268410deU
-#define GU_BOARD_SUBSYSTEM 0x167c10deU
+#define GU_BOARD_SUBSYSTEM 0x165b10deU
 /* AD102 identity documented by the Linux 4090 transaction. */
 #define GU_BOARD_CHIP 0x192000a1U
-#define GU_BOARD_BUS 0xa8U
+#define GU_BOARD_BUS 0x01U
 typedef struct GU_DMA GU_DMA;
 struct GU_DMA {
   GU_DMA *next;
