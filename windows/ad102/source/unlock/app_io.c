@@ -60,8 +60,7 @@ static BOOLEAN UsbPath(EFI_HANDLE Handle) {
   }
   return FALSE;
 }
-BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
-  static const EFI_GUID guid={KOH_WINDOWS_ESP_GUID};
+static BOOLEAN EspGuidPath(EFI_HANDLE Handle,const EFI_GUID *Want,UINT32 Partition) {
   EFI_DEVICE_PATH_PROTOCOL *path=NULL;
   if(EFI_ERROR(Table->BootServices->HandleProtocol(Handle,&PathGuid,(VOID **)&path)) || !path)return FALSE;
   UINTN off=0;
@@ -72,13 +71,21 @@ BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
     if(node->Type==MEDIA_DEVICE_PATH && node->SubType==MEDIA_HARDDRIVE_DP) {
       if(len!=sizeof(HARDDRIVE_DEVICE_PATH))return FALSE;
       HARDDRIVE_DEVICE_PATH *hd=(VOID*)node;
-      return hd->SignatureType==2 && hd->MBRType==2 && hd->PartitionNumber==1 &&
-        !memcmp(hd->Signature,&guid,sizeof(guid));
+      return hd->SignatureType==2 && hd->MBRType==2 && hd->PartitionNumber==Partition &&
+        !memcmp(hd->Signature,Want,sizeof(*Want));
     }
     if(node->Type==END_DEVICE_PATH_TYPE)return FALSE;
     off+=len;
   }
   return FALSE;
+}
+BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
+  static const EFI_GUID guid={KOH_WINDOWS_ESP_GUID};
+  return EspGuidPath(Handle,&guid,1);
+}
+static BOOLEAN GuPayloadEsp(EFI_HANDLE Handle) {
+  static const EFI_GUID guid={KOH_PAYLOAD_ESP_GUID};
+  return EspGuidPath(Handle,&guid,5);
 }
 static EFI_STATUS Metadata(EFI_FILE_PROTOCOL *File,BOOLEAN Directory,UINTN Expected) {
   union {EFI_FILE_INFO info;UINT8 bytes[512];} data;UINTN n=sizeof(data);
@@ -93,7 +100,8 @@ EFI_STATUS GuIoOpen(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
   Table=St;Root=Parent=Run=Report=NULL;LogFault=FALSE;memset(GuAssets,0,sizeof(GuAssets));
   EFI_LOADED_IMAGE_PROTOCOL *loaded=NULL;EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs=NULL;
   EFI_STATUS status=Table->BootServices->HandleProtocol(Image,&LoadedGuid,(VOID **)&loaded);
-  if(EFI_ERROR(status) || !loaded || !(UsbPath(loaded->DeviceHandle) || GuLocalEsp(loaded->DeviceHandle)))return EFI_UNSUPPORTED;
+  if(EFI_ERROR(status) || !loaded || !(UsbPath(loaded->DeviceHandle) || GuLocalEsp(loaded->DeviceHandle) ||
+    GuPayloadEsp(loaded->DeviceHandle)))return EFI_UNSUPPORTED;
   status=Table->BootServices->HandleProtocol(loaded->DeviceHandle,&FsGuid,(VOID **)&fs);
   if(EFI_ERROR(status) || !fs)return EFI_UNSUPPORTED;
   status=fs->OpenVolume(fs,&Root);if(EFI_ERROR(status) || !Root)return EFI_DEVICE_ERROR;

@@ -16,6 +16,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE,EFI_SYSTEM_TABLE*);
 static int extra_case,windows_loaded,windows_started,connect_calls;
 static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } local_esp_path;
 static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } wrong_esp_path;
+static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } payload_esp_path;
 static EFI_LOADED_IMAGE_PROTOCOL windows_loaded_image;
 static EFI_SIMPLE_FILE_SYSTEM_PROTOCOL windows_fs;
 #include <Protocol/LoadedImage.h>
@@ -47,7 +48,7 @@ enum app_case { APP_SUCCESS, APP_ESCAPE, APP_TIMEOUT, APP_OLD_KEY, APP_OWNER,
  APP_DECODE_EXTRA_BME, APP_DECODE_LOG_FAIL, APP_DECODE_READ_FAIL, APP_DECODE_NO_API,
  APP_DECODE_SUPPORT_ERROR, APP_DECODE_ENABLE_ERROR_MATCH,
  APP_MASTER_ENABLE_ERROR, APP_MASTER_DISABLE_ERROR, APP_MASTER_ENABLE_ERROR_CLEAR_BAD,
- APP_ESP_BOOT, APP_ESP_WRONG_GUID, APP_COUNT };
+ APP_ESP_BOOT, APP_ESP_WRONG_GUID, APP_PAYLOAD_BOOT, APP_COUNT };
 static const char *app_names[]={"success","escape","timeout","old-key","driver-owner",
  "secure-boot","duplicate-target","bad-bar","unknown-gop","rtx-gop","not-usb",
  "partial-report-write","report-flush","asset-size","asset-hash","prom-hash",
@@ -70,7 +71,7 @@ static const char *app_names[]={"success","escape","timeout","old-key","driver-o
  "decode-partial-result","decode-unwanted-bme","decode-intent-log-failure","decode-readback-error","decode-missing-api",
  "decode-support-query-error","decode-enable-error-matching-readback",
  "master-enable-error-after-write","master-disable-error-retains","master-nonstarted-bad-hardware-cleanup",
- "esp-boot-volume","esp-wrong-guid"};
+ "esp-boot-volume","esp-wrong-guid","payload-boot-volume"};
 static enum app_case app_mode;
 static EFI_SYSTEM_TABLE st;
 static EFI_RUNTIME_SERVICES rt;
@@ -195,7 +196,8 @@ static EFI_STATUS EFIAPI handle(EFI_HANDLE h,EFI_GUID *g,VOID **p) {
   else if(guid(g,&dg)) {
     if(h==H(12) || h==H(13))*p=&local_esp_path;
     else if(h==H(2) && app_mode!=APP_NO_USB)*p=app_mode==APP_ESP_BOOT?(VOID*)&local_esp_path:
-      app_mode==APP_ESP_WRONG_GUID?(VOID*)&wrong_esp_path:usb_path;
+      app_mode==APP_ESP_WRONG_GUID?(VOID*)&wrong_esp_path:
+      app_mode==APP_PAYLOAD_BOOT?(VOID*)&payload_esp_path:usb_path;
     else if(h==H(5))*p=(VOID *)rtx_path;
     else if(h==H(10))*p=(VOID *)(extra_case==16 && key_sent?changed_child_path:
       extra_case==11 || app_mode==APP_HANDOFF_BAD_CHILD || app_mode==APP_HANDOFF_OTHER_CHILD?intel_path:rtx_path);
@@ -504,6 +506,10 @@ static void app_setup(enum app_case mode) {
   memcpy(local_esp_path.hd.Signature,&esp,sizeof(esp));
   local_esp_path.end.Type=END_DEVICE_PATH_TYPE;local_esp_path.end.SubType=END_ENTIRE_DEVICE_PATH_SUBTYPE;local_esp_path.end.Length[0]=4;
   memcpy(&wrong_esp_path,&local_esp_path,sizeof(wrong_esp_path));wrong_esp_path.hd.Signature[0]^=0xff;
+  memcpy(&payload_esp_path,&local_esp_path,sizeof(payload_esp_path));
+  EFI_GUID payload={KOH_PAYLOAD_ESP_GUID};
+  memcpy(payload_esp_path.hd.Signature,&payload,sizeof(payload));
+  payload_esp_path.hd.PartitionNumber=5;
   memset(&st,0,sizeof(st));memset(&rt,0,sizeof(rt));memset(files,0,sizeof(files));memset(&loaded,0,sizeof(loaded));
   exclusive_calls=close_protocol_calls=key_calls=watchdog_calls=report_bytes=file_closes=0;
   query_calls=0;query_allocation=NULL;prom_dump_calls=0;
@@ -579,7 +585,7 @@ int main(int argc,char **argv) {
     APP_HANDOFF_CONFIG,APP_HANDOFF_PROM,APP_HANDOFF_MISSING_PCI,APP_HANDOFF_REPLACED_PCI,APP_DIRTY,
     APP_SELECTOR,APP_UNMAP,APP_LOG_DIRTY,APP_FWSEC_NO_WPR,APP_MASTER_ENABLE_ERROR,APP_MASTER_DISABLE_ERROR,
     APP_HANDOFF_LOG,APP_CLOSE,APP_HANDOFF_CHILD,APP_HANDOFF_BAD_CHILD,APP_HANDOFF_OTHER_CHILD,
-    APP_ESP_BOOT,APP_ESP_WRONG_GUID};
+    APP_ESP_BOOT,APP_ESP_WRONG_GUID,APP_PAYLOAD_BOOT};
   const int injected[]={SUCCESS,SEC2_STUCK_HALT,SEC2_RUN_HALT,SEC2_RUN_TIMEOUT,
    SEC2_UNAVAILABLE,SEC2_DIAG_FAIL,SEC2_PROTECTED_DIAG,SEC2_STATUS_ERROR_PLM_OPEN,
    PLM_SECOND_TARGET_TIMEOUT,PLM_PRIOR_RELOCK,PLM_WRONG_WPR_CFG_MASK,
@@ -597,7 +603,7 @@ int main(int argc,char **argv) {
     volatile EFI_STATUS result=EFI_ABORTED;
     int jumped=setjmp(escape_halt);if(!jumped)result=EfiMain(H(1),&st);
     BOOLEAN success=(mode==APP_HANDOFF || mode==APP_HANDOFF_CONFIG || mode==APP_HANDOFF_CHILD ||
-      mode==APP_ESP_BOOT) &&
+      mode==APP_ESP_BOOT || mode==APP_PAYLOAD_BOOT) &&
       (!injected_case || ad_success(injected[i-basic_count]));
     if(success) {
       CHECK(windows_started && jumped==2 && !halted && fake.flrs==1 && connect_calls==1);
