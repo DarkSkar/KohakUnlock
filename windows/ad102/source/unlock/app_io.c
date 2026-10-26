@@ -71,7 +71,7 @@ static BOOLEAN EspGuidPath(EFI_HANDLE Handle,const EFI_GUID *Want,UINT32 Partiti
     if(node->Type==MEDIA_DEVICE_PATH && node->SubType==MEDIA_HARDDRIVE_DP) {
       if(len!=sizeof(HARDDRIVE_DEVICE_PATH))return FALSE;
       HARDDRIVE_DEVICE_PATH *hd=(VOID*)node;
-      return hd->SignatureType==2 && hd->MBRType==2 && hd->PartitionNumber==Partition &&
+      return hd->SignatureType==2 && hd->MBRType==2 && (Partition==0 || hd->PartitionNumber==Partition) &&
         !memcmp(hd->Signature,Want,sizeof(*Want));
     }
     if(node->Type==END_DEVICE_PATH_TYPE)return FALSE;
@@ -85,7 +85,11 @@ BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
 }
 static BOOLEAN GuPayloadEsp(EFI_HANDLE Handle) {
   static const EFI_GUID guid={KOH_PAYLOAD_ESP_GUID};
-  return EspGuidPath(Handle,&guid,5);
+  /* Partition NUMBER is not pinned: diskpart renumbered the payload from the
+     planned part 5 to part 4 after the C: shrink (measured 2026-10-26, the
+     hardware run failed on the stale number). The GPT GUID is unique and
+     authoritative; 0 = accept any index. */
+  return EspGuidPath(Handle,&guid,0);
 }
 static EFI_STATUS Metadata(EFI_FILE_PROTOCOL *File,BOOLEAN Directory,UINTN Expected) {
   union {EFI_FILE_INFO info;UINT8 bytes[512];} data;UINTN n=sizeof(data);
