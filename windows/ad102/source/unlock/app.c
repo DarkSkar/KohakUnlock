@@ -30,8 +30,18 @@ static VOID ConfigLog(const UINT32 *Config) {
   for(UINTN i=0;i<64;i+=4)GuLog("config[%02x]=%08x %08x %08x %08x\n",
     (unsigned)(i*4),Config[i],Config[i+1],Config[i+2],Config[i+3]);
 }
+static VOID PathLog(const char *Tag,const EFI_DEVICE_PATH_PROTOCOL *Path) {
+  static const char digits[]="0123456789abcdef";char hex[201];UINTN i=0;
+  if(!Path){GuLog("%s path=(null)\n",Tag);return;}
+  while(i<190 && !(Path->Type==0x7f && Path->SubType==0xff)) {
+    const UINT8 *p=(const UINT8*)Path;UINTN len=(UINTN)Path->Length[0]|((UINTN)Path->Length[1]<<8);
+    for(UINTN k=0;k<len && i<190;k++){hex[i++]=digits[p[k]>>4];hex[i++]=digits[p[k]&15];}
+    if(!len)break;Path=(const EFI_DEVICE_PATH_PROTOCOL*)((const UINT8*)Path+len);
+  }
+  hex[i]=0;GuLog("%s path=%s\n",Tag,hex);
+}
 static BOOLEAN DisplayCheck(VOID) {
-  EFI_HANDLE *handles=NULL;UINTN count=0,physical=0,matched=0,others=0;
+  EFI_HANDLE *handles=NULL;UINTN count=0,physical=0,matched=0,others=0,targetGops=0;
   OTHER_DISPLAY snapshot[8];memset(snapshot,0,sizeof(snapshot));
   EFI_STATUS status=Gu.bs->LocateHandleBuffer(ByProtocol,&GopGuid,NULL,&count,&handles);
   if(status==EFI_NOT_FOUND && ExpectDetached)return OtherCount==0 && GuLogReady();
@@ -39,13 +49,27 @@ static BOOLEAN DisplayCheck(VOID) {
   for(UINTN i=0;i<count;i++) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *g=NULL;EFI_DEVICE_PATH_PROTOCOL *path=NULL;
     status=Gu.bs->HandleProtocol(handles[i],&GopGuid,(VOID **)&g);
-    if(EFI_ERROR(status) || !g || !g->Mode){status=EFI_COMPROMISED_DATA;break;}
-    if(!g->Mode->FrameBufferBase && !g->Mode->FrameBufferSize)continue;
+    if(EFI_ERROR(status) || !g || !g->Mode){GuLog("display substep=gop handle=%#zx status=%#llx\n",(size_t)handles[i],(unsigned long long)status);status=EFI_COMPROMISED_DATA;break;}
+    if(!g->Mode->FrameBufferBase && !g->Mode->FrameBufferSize) {
+      /* Count framebuffer-less GOP children of the target so matched==0 can be a
+       * verified state instead of a blind pass. Resolution failures here remain
+       * informational. */
+      EFI_DEVICE_PATH_PROTOCOL *rpath=NULL;EFI_HANDLE rparent=NULL;
+      EFI_STATUS rs=Gu.bs->HandleProtocol(handles[i],&PathGuid,(VOID **)&rpath);
+      if(!EFI_ERROR(rs)&&rpath) {
+        rs=Gu.bs->LocateDevicePath(&PciGuid,&rpath,&rparent);
+        if(!EFI_ERROR(rs)&&rparent==Gu.handle)targetGops++;
+      }
+      continue;
+    }
     physical++;
     status=Gu.bs->HandleProtocol(handles[i],&PathGuid,(VOID **)&path);
-    if(EFI_ERROR(status) || !path){status=EFI_UNSUPPORTED;break;}
+    if(EFI_ERROR(status) || !path){GuLog("display substep=path handle=%#zx status=%#llx\n",(size_t)handles[i],(unsigned long long)status);status=EFI_UNSUPPORTED;break;}
+    PathLog("display gop handle",path);
     EFI_HANDLE parent=NULL;status=Gu.bs->LocateDevicePath(&PciGuid,&path,&parent);
-    if(EFI_ERROR(status) || !parent){status=EFI_UNSUPPORTED;break;}
+    if(EFI_ERROR(status) || !parent){GuLog("display substep=parent handle=%#zx status=%#llx\n",(size_t)handles[i],(unsigned long long)status);status=EFI_UNSUPPORTED;break;}
+    GuLog("display gop[%zu] parent=%#zx target_handle=%#zx\n",i,(size_t)parent,(size_t)Gu.handle);
+    if(parent==Gu.handle)targetGops++;
     if(!g->Mode->Info || g->Mode->SizeOfInfo<sizeof(*g->Mode->Info) ||
        !g->Mode->FrameBufferSize || !g->Mode->Info->VerticalResolution ||
        !g->Mode->Info->HorizontalResolution || g->Mode->Info->PixelFormat>PixelBlueGreenRedReserved8BitPerColor ||
@@ -57,7 +81,7 @@ static BOOLEAN DisplayCheck(VOID) {
     else {
       EFI_PCI_IO_PROTOCOL *other=NULL;UINT32 id=0;
       status=Gu.bs->HandleProtocol(parent,&PciGuid,(VOID**)&other);
-      if(EFI_ERROR(status) || !other || others>=8){status=EFI_UNSUPPORTED;break;}
+      if(EFI_ERROR(status) || !other || others>=8){GuLog("display substep=parent-pci parent=%#zx status=%#llx others=%zu\n",(size_t)parent,(unsigned long long)status,others);status=EFI_UNSUPPORTED;break;}
       status=other->Pci.Read(other,EfiPciIoWidthUint32,0,1,&id);
       /* The only independent physical display devices on this machine. */
       if(EFI_ERROR(status) || id!=0xe2128086U){status=EFI_UNSUPPORTED;break;}
@@ -81,9 +105,13 @@ static BOOLEAN DisplayCheck(VOID) {
     }
   }
   GuFree(handles);
-  GuLog("GOP physical=%zu target=%zu expect_detached=%u status=%#llx\n",(size_t)physical,(size_t)matched,
+  GuLog("GOP handles=%zu physical=%zu target=%zu target_gops=%zu expect_detached=%u status=%#llx\n",count,(size_t)physical,(size_t)matched,(size_t)targetGops,
     ExpectDetached,(unsigned long long)status);
-  return !EFI_ERROR(status) && (ExpectDetached?matched==0:(matched>=1 && matched<=8)) && GuLogReady();
+  /* matched>=1 encodes the reference machine's target display children. A headless
+   * compute card whose target exposes no GOP children at all is a verified safe
+   * state, not a missing prerequisite: accept matched==0 only when target_gops==0.
+   * The independent-display snapshot and the ownership gating remain unchanged. */
+  return !EFI_ERROR(status) && (ExpectDetached?matched==0:(matched<=8 && (matched>=1 || targetGops==0))) && GuLogReady();
 }
 #include "handoff.inc"
 static EFI_STATUS ReadConfig(UINT32 *Config) {
