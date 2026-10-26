@@ -2,6 +2,7 @@
 #include "app_io.h"
 #include "compat/compat.h"
 #include "format.h"
+#include "local_profile.h"
 #include "sha256.h"
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
@@ -59,6 +60,26 @@ static BOOLEAN UsbPath(EFI_HANDLE Handle) {
   }
   return FALSE;
 }
+BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
+  static const EFI_GUID guid={KOH_WINDOWS_ESP_GUID};
+  EFI_DEVICE_PATH_PROTOCOL *path=NULL;
+  if(EFI_ERROR(Table->BootServices->HandleProtocol(Handle,&PathGuid,(VOID **)&path)) || !path)return FALSE;
+  UINTN off=0;
+  for(UINTN i=0;i<128 && off<=4092;i++) {
+    EFI_DEVICE_PATH_PROTOCOL *node=(VOID*)((UINT8*)path+off);
+    UINTN len=node->Length[0]+((UINTN)node->Length[1]<<8);
+    if(len<4 || len>4096-off)return FALSE;
+    if(node->Type==MEDIA_DEVICE_PATH && node->SubType==MEDIA_HARDDRIVE_DP) {
+      if(len!=sizeof(HARDDRIVE_DEVICE_PATH))return FALSE;
+      HARDDRIVE_DEVICE_PATH *hd=(VOID*)node;
+      return hd->SignatureType==2 && hd->MBRType==2 && hd->PartitionNumber==1 &&
+        !memcmp(hd->Signature,&guid,sizeof(guid));
+    }
+    if(node->Type==END_DEVICE_PATH_TYPE)return FALSE;
+    off+=len;
+  }
+  return FALSE;
+}
 static EFI_STATUS Metadata(EFI_FILE_PROTOCOL *File,BOOLEAN Directory,UINTN Expected) {
   union {EFI_FILE_INFO info;UINT8 bytes[512];} data;UINTN n=sizeof(data);
   EFI_STATUS status=File->GetInfo(File,&InfoGuid,&n,&data);
@@ -72,7 +93,7 @@ EFI_STATUS GuIoOpen(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
   Table=St;Root=Parent=Run=Report=NULL;LogFault=FALSE;memset(GuAssets,0,sizeof(GuAssets));
   EFI_LOADED_IMAGE_PROTOCOL *loaded=NULL;EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs=NULL;
   EFI_STATUS status=Table->BootServices->HandleProtocol(Image,&LoadedGuid,(VOID **)&loaded);
-  if(EFI_ERROR(status) || !loaded || !UsbPath(loaded->DeviceHandle))return EFI_UNSUPPORTED;
+  if(EFI_ERROR(status) || !loaded || !(UsbPath(loaded->DeviceHandle) || GuLocalEsp(loaded->DeviceHandle)))return EFI_UNSUPPORTED;
   status=Table->BootServices->HandleProtocol(loaded->DeviceHandle,&FsGuid,(VOID **)&fs);
   if(EFI_ERROR(status) || !fs)return EFI_UNSUPPORTED;
   status=fs->OpenVolume(fs,&Root);if(EFI_ERROR(status) || !Root)return EFI_DEVICE_ERROR;
@@ -95,7 +116,7 @@ EFI_STATUS GuIoOpen(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
     if(status!=EFI_NOT_FOUND)return status;
     status=Run->Open(Run,&Report,L"REPORT.TXT",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,0);
     if(EFI_ERROR(status) || !Report)return EFI_DEVICE_ERROR;
-    GuLog("RTX 4090 AD102 / LOCAL USB UNLOCK TRIAL\nRUN%02u\nPress U once: one firmware transaction, verified selectors, FLR and Windows handoff. Selector mismatch stops the attempt. Local ROM/profile pinned; first hardware trial pending.\n",(unsigned)slot);
+    GuLog("RTX 4090 AD102 / LOCAL USB/ESP UNLOCK TRIAL\nRUN%02u\nPress U once: one firmware transaction, verified selectors, FLR and Windows handoff. Selector mismatch stops the attempt. Local ROM/profile pinned; first hardware trial pending.\n",(unsigned)slot);
     GuLogText("PIO readback is not an execution gate. This path does not independently verify TCM contents; FWSEC scratch/WPR results are required.\n");
     return GuLogReady()?EFI_SUCCESS:EFI_DEVICE_ERROR;
   }
