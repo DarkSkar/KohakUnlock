@@ -6,8 +6,12 @@
 #include <string.h>
 #include <stdarg.h>
 #include <malloc.h>
+#ifndef _WIN32
+/* glibc: C11 aligned_alloc + free pair. On Windows, _aligned_malloc/_aligned_free
+ * are declared by malloc.h and form the matching pair; use them directly. */
 #define _aligned_malloc(n,a) aligned_alloc(a,n)
 #define _aligned_free(p) free(p)
+#endif
 #undef EPROTO
 #undef EBADMSG
 #undef EOVERFLOW
@@ -168,7 +172,9 @@ static VOID check_fwsec_image(void) {
   UINT64 last_source=((UINT64)registers[(GSP+0x110)/4]<<8)|((UINT64)registers[(GSP+0x128)/4]<<40);
   CHECK(last_source>=0xf200);UINT8 *image=dma_pointer(last_source-0xf200,0x10000);
   CHECK(!memcmp(gsp_dmem,image+0xf200,sizeof(gsp_dmem)));
-  CHECK(!memcmp(gsp_dmem+0xb24,prom+0x43e68+0x180,384));
+  /* Our ROM: FWSEC descriptor at 0x44dc0, signatures at desc+44=0x44dec
+   * (upstream fixture pinned their 0x43e68). */
+  CHECK(!memcmp(gsp_dmem+0xb24,prom+0x44dec+0x180,384));
   CHECK(registers[0x1183a4/4]==0x6000 || registers[0x1183a4/4]==0x5ff8);
   CHECK(le32(gsp_dmem+0xd40+32)==(registers[0x1183a4/4]==0x5ff8?0x5ff600:0x5ffe00));
   CHECK(le32(gsp_dmem+0xd40+36)==0x100);
@@ -512,7 +518,7 @@ static VOID setup(enum scenario mode) {
   pci.AllocateBuffer=allocate_buffer;pci.FreeBuffer=free_buffer;pci.Map=map_buffer;pci.Unmap=unmap_buffer;
   pci.Pci.Read=read_config;pci.Pci.Write=write_config;pci.Mem.Read=read_memory;pci.Mem.Write=write_memory;pci.Flush=flush;
   pci.Attributes=master_attributes;fake.pci_attributes=EFI_PCI_IO_ATTRIBUTE_IO|EFI_PCI_IO_ATTRIBUTE_MEMORY;
-  *(UINT32 *)(config+0)=0x268410de;*(UINT32 *)(config+0x2c)=0x167c10de;
+  *(UINT32 *)(config+0)=0x268410de;*(UINT32 *)(config+0x2c)=0x165b10de;
   *(UINT32 *)(config+4)=0x00100003;*(UINT32 *)(config+8)=0x030000a1;*(UINT32 *)(config+12)=0x00800010;
   *(UINT32 *)(config+0x10)=0x80000000;*(UINT32 *)(config+0x14)=0xc;*(UINT32 *)(config+0x18)=0x60;
   *(UINT32 *)(config+0x1c)=0xc;*(UINT32 *)(config+0x20)=0x64;*(UINT32 *)(config+0x24)=0x5001;
