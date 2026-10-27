@@ -79,6 +79,24 @@ static BOOLEAN EspGuidPath(EFI_HANDLE Handle,const EFI_GUID *Want,UINT32 Partiti
   }
   return FALSE;
 }
+/* Byte-identical device paths mean the SAME volume seen through two handles;
+   the volume we booted from must never be adopted as a payload candidate,
+   even when a profile leaves both GUID defaults at zero. */
+static BOOLEAN SameDevicePath(EFI_HANDLE A,EFI_HANDLE B) {
+  EFI_DEVICE_PATH_PROTOCOL *a=NULL,*b=NULL;
+  if(EFI_ERROR(Table->BootServices->HandleProtocol(A,&PathGuid,(VOID **)&a)) ||
+    EFI_ERROR(Table->BootServices->HandleProtocol(B,&PathGuid,(VOID **)&b)) || !a || !b)return FALSE;
+  UINTN off=0;
+  for(UINTN i=0;i<128 && off<=4092;i++) {
+    EFI_DEVICE_PATH_PROTOCOL *na=(VOID*)((UINT8*)a+off);
+    UINTN len=na->Length[0]+((UINTN)na->Length[1]<<8);
+    if(len<4 || len>4096-off)return FALSE;
+    if(memcmp(na,(UINT8*)b+off,len)!=0)return FALSE;
+    if(na->Type==END_DEVICE_PATH_TYPE)return na->SubType==END_ENTIRE_DEVICE_PATH_SUBTYPE;
+    off+=len;
+  }
+  return FALSE;
+}
 BOOLEAN GuLocalEsp(EFI_HANDLE Handle) {
   static const EFI_GUID guid={KOH_WINDOWS_ESP_GUID};
   return EspGuidPath(Handle,&guid,1);
@@ -113,22 +131,42 @@ EFI_STATUS GuIoOpen(EFI_HANDLE Image,EFI_SYSTEM_TABLE *St) {
   status=Root->Open(Root,&Parent,L"\\RTX4090-UNLOCK",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
   if(status==EFI_NOT_FOUND && esp) {
     /* ESP boot: the ESP only holds the loader; the payload volume keeps the
-       work tree. Mirror PreloadWindows: find it by its pinned GUID. */
-    EFI_HANDLE *hs=NULL;UINTN n=0;
+       work tree. Mirror PreloadWindows: find it by its pinned GUID and accept
+       it only when EXACTLY one volume matches — an ambiguous GPT (two volumes
+       sharing the GUID, e.g. after a disk clone) must not be adopted. */
+    EFI_HANDLE *hs=NULL;UINTN n=0,matches=0,chosen=0;
     status=Table->BootServices->LocateHandleBuffer(ByProtocol,&FsGuid,NULL,&n,&hs);
-    if(EFI_ERROR(status) || !hs || n>256)return EFI_NOT_FOUND;
+    if(EFI_ERROR(status) || !hs || n>256) {if(hs)Table->BootServices->FreePool(hs);return EFI_NOT_FOUND;}
     for(UINTN i=0;i<n;i++) {
-      if(!GuPayloadEsp(hs[i]))continue;
-      EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *pfs=NULL;EFI_FILE_PROTOCOL *proot=NULL;
-      EFI_STATUS x=Table->BootServices->HandleProtocol(hs[i],&FsGuid,(VOID **)&pfs);
-      if(EFI_ERROR(x) || !pfs)continue;
-      x=pfs->OpenVolume(pfs,&proot);if(EFI_ERROR(x) || !proot)continue;
-      EFI_FILE_PROTOCOL *pparent=NULL;
-      x=proot->Open(proot,&pparent,L"\\RTX4090-UNLOCK",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
-      if(EFI_ERROR(x) || !pparent) {x=proot->Close(proot);continue;}
-      /* The load volume's root is no longer needed; close it before adopting
-         the payload root so GuIoClose never touches a stale handle. */
-      Root->Close(Root);Root=proot;Parent=pparent;status=EFI_SUCCESS;break;
+      if(SameDevicePath(hs[i],loaded->DeviceHandle) || !GuPayloadEsp(hs[i]))continue;
+      matches++;chosen=i;if(matches>1)break;
+    }
+    if(matches>1) {Table->BootServices->FreePool(hs);return EFI_NO_MAPPING;}
+    if(matches==1) {
+      EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *pfs=NULL;EFI_FILE_PROTOCOL *proot=NULL,*pparent=NULL;
+      status=Table->BootServices->HandleProtocol(hs[chosen],&FsGuid,(VOID **)&pfs);
+      if(EFI_ERROR(status) || !pfs)status=EFI_DEVICE_ERROR;
+      else status=pfs->OpenVolume(pfs,&proot);
+      if(EFI_ERROR(status) || !proot)status=EFI_DEVICE_ERROR;
+      if(!EFI_ERROR(status))status=proot->Open(proot,&pparent,L"\\RTX4090-UNLOCK",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE,0);
+      if(EFI_ERROR(status) || !pparent) {
+        /* abandon the candidate without ever switching roots; a failed Close
+           here is a leak on a volume we are dropping, not fatal to the run. */
+        if(pparent)pparent->Close(pparent);
+        if(proot && proot!=pparent)proot->Close(proot);
+        Table->BootServices->FreePool(hs);
+        return EFI_ERROR(status)?status:EFI_DEVICE_ERROR;
+      }
+      /* The load volume's root is no longer needed. Close it and CHECK the
+         result before adopting the payload root: Close invalidates the handle
+         even on error, so on failure we null Root and bail rather than leave
+         GuIoClose facing a half-switched pair. */
+      status=Root->Close(Root);
+      if(EFI_ERROR(status)) {
+        pparent->Close(pparent);proot->Close(proot);Root=NULL;
+        Table->BootServices->FreePool(hs);return EFI_DEVICE_ERROR;
+      }
+      Root=proot;Parent=pparent;status=EFI_SUCCESS;
     }
     Table->BootServices->FreePool(hs);
     if(EFI_ERROR(status))return EFI_NOT_FOUND;

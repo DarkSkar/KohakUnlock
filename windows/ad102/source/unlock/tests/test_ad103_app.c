@@ -19,6 +19,8 @@ static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } wrong_
 static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } payload_esp_path;
 static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } esp_only_path;
 static EFI_SIMPLE_FILE_SYSTEM_PROTOCOL esp_only_fs;
+static struct { HARDDRIVE_DEVICE_PATH hd; EFI_DEVICE_PATH_PROTOCOL end; } payload2_path;
+static EFI_SIMPLE_FILE_SYSTEM_PROTOCOL payload2_fs;
 static EFI_LOADED_IMAGE_PROTOCOL windows_loaded_image;
 static EFI_SIMPLE_FILE_SYSTEM_PROTOCOL windows_fs;
 #include <Protocol/LoadedImage.h>
@@ -50,7 +52,8 @@ enum app_case { APP_SUCCESS, APP_ESCAPE, APP_TIMEOUT, APP_OLD_KEY, APP_OWNER,
  APP_DECODE_EXTRA_BME, APP_DECODE_LOG_FAIL, APP_DECODE_READ_FAIL, APP_DECODE_NO_API,
  APP_DECODE_SUPPORT_ERROR, APP_DECODE_ENABLE_ERROR_MATCH,
  APP_MASTER_ENABLE_ERROR, APP_MASTER_DISABLE_ERROR, APP_MASTER_ENABLE_ERROR_CLEAR_BAD,
- APP_ESP_BOOT, APP_ESP_WRONG_GUID, APP_PAYLOAD_BOOT, APP_ESP_NO_ASSETS, APP_PAYLOAD_RENUM, APP_COUNT };
+ APP_ESP_BOOT, APP_ESP_WRONG_GUID, APP_PAYLOAD_BOOT, APP_ESP_NO_ASSETS, APP_PAYLOAD_RENUM,
+ APP_PAYLOAD_MULTI, APP_COUNT };
 static const char *app_names[]={"success","escape","timeout","old-key","driver-owner",
  "secure-boot","duplicate-target","bad-bar","unknown-gop","rtx-gop","not-usb",
  "partial-report-write","report-flush","asset-size","asset-hash","prom-hash",
@@ -73,7 +76,8 @@ static const char *app_names[]={"success","escape","timeout","old-key","driver-o
  "decode-partial-result","decode-unwanted-bme","decode-intent-log-failure","decode-readback-error","decode-missing-api",
  "decode-support-query-error","decode-enable-error-matching-readback",
  "master-enable-error-after-write","master-disable-error-retains","master-nonstarted-bad-hardware-cleanup",
- "esp-boot-volume","esp-wrong-guid","payload-boot-volume","esp-load-payload-assets","payload-renumbered"};
+ "esp-boot-volume","esp-wrong-guid","payload-boot-volume","esp-load-payload-assets","payload-renumbered",
+ "payload-multi-match"};
 static enum app_case app_mode;
 static EFI_SYSTEM_TABLE st;
 static EFI_RUNTIME_SERVICES rt;
@@ -100,7 +104,7 @@ static UINT8 changed_child_path[]={2,1,12,0,0xd0,0x41,3,0xa,0,0,0,0,1,1,6,0,0,1,
 static UINT8 usb_path[]={3,5,6,0,1,0,0x7f,0xff,4,0};
 #define H(n) ((EFI_HANDLE)(UINTN)(n))
 typedef struct {EFI_FILE_PROTOCOL protocol;int kind;UINTN position;BOOLEAN open;} FILE_FAKE;
-static FILE_FAKE files[12]; /* root, parent, run, report, assets, Windows, PROM dump */
+static FILE_FAKE files[13]; /* root, parent, run, report, assets, Windows, PROM dump, payload roots (kind 12) */
 static UINTN prom_dump_calls;
 static GU_ASSET originals[5];
 static UINT32 captured_config[64];
@@ -155,7 +159,9 @@ static EFI_STATUS EFIAPI locate(EFI_LOCATE_SEARCH_TYPE search,EFI_GUID *g,VOID *
   if(guid(g,&fg)) {
     *n=extra_case==1?2:1;CHECK(!EFI_ERROR(allocate_pool(EfiLoaderData,*n*sizeof(**h),(VOID**)h)));
     if(app_mode==APP_ESP_NO_ASSETS||app_mode==APP_PAYLOAD_RENUM)*n=2;
-    for(UINTN i=0;i<*n;i++)(*h)[i]=app_mode==APP_ESP_NO_ASSETS||app_mode==APP_PAYLOAD_RENUM?(i?H(15):H(12)):H(12+i);return EFI_SUCCESS;
+    if(app_mode==APP_PAYLOAD_MULTI)*n=3;
+    for(UINTN i=0;i<*n;i++)(*h)[i]=app_mode==APP_PAYLOAD_MULTI?(i==1?H(15):(i==2?H(16):H(12))):
+      app_mode==APP_ESP_NO_ASSETS||app_mode==APP_PAYLOAD_RENUM?(i?H(15):H(12)):H(12+i);return EFI_SUCCESS;
   }
   if(guid(g,&pg) && (extra_case==102 || extra_case==103)) {
     *n=extra_case==102?317:4096;CHECK(!EFI_ERROR(allocate_pool(EfiLoaderData,*n*sizeof(**h),(VOID**)h)));
@@ -183,6 +189,7 @@ static EFI_STATUS EFIAPI handle(EFI_HANDLE h,EFI_GUID *g,VOID **p) {
   }
   if((h==H(12)||h==H(13)) && guid(g,&fg))*p=&windows_fs;
   else if(h==H(15) && guid(g,&fg))*p=&esp_only_fs;
+  else if(h==H(16) && guid(g,&fg))*p=&payload2_fs;
   else if(h==H(14) && guid(g,&lg))*p=&windows_loaded_image;
   else if(h==H(1) && guid(g,&lg))*p=&loaded;
   else if(h==H(2) && guid(g,&fg))*p=&fs;
@@ -200,10 +207,11 @@ static EFI_STATUS EFIAPI handle(EFI_HANDLE h,EFI_GUID *g,VOID **p) {
   else if(guid(g,&dg)) {
     if(h==H(12) || h==H(13))*p=&local_esp_path;
     else if(h==H(15))*p=&esp_only_path;
+    else if(h==H(16))*p=&payload2_path;
     else if(h==H(2) && app_mode!=APP_NO_USB)*p=app_mode==APP_ESP_BOOT?(VOID*)&local_esp_path:
       app_mode==APP_ESP_WRONG_GUID?(VOID*)&wrong_esp_path:
       app_mode==APP_PAYLOAD_BOOT?(VOID*)&payload_esp_path:
-      app_mode==APP_ESP_NO_ASSETS || app_mode==APP_PAYLOAD_RENUM?(VOID*)&local_esp_path:usb_path;
+      app_mode==APP_ESP_NO_ASSETS || app_mode==APP_PAYLOAD_RENUM || app_mode==APP_PAYLOAD_MULTI?(VOID*)&local_esp_path:usb_path;
     else if(h==H(5))*p=(VOID *)rtx_path;
     else if(h==H(10))*p=(VOID *)(extra_case==16 && key_sent?changed_child_path:
       extra_case==11 || app_mode==APP_HANDOFF_BAD_CHILD || app_mode==APP_HANDOFF_OTHER_CHILD?intel_path:rtx_path);
@@ -395,7 +403,14 @@ static EFI_STATUS EFIAPI file_open(EFI_FILE_PROTOCOL *f,EFI_FILE_PROTOCOL **out,
   if(v->kind==9 && !strcmp(path,"\\EFI\\Microsoft\\Boot\\bootmgfw.efi")) {
     if(extra_case==2)return EFI_NOT_FOUND;target=10;
   }
-  else if(v->kind==0 && !strcmp(path,"\\RTX4090-UNLOCK"))target=1;
+  else if(v->kind==0 && !strcmp(path,"\\RTX4090-UNLOCK")) {
+    /* ESP_NO_ASSETS/RENUM/MULTI model the hardware layout: the ESP holds only
+       the loader; the work tree lives on the payload volume, so the ESP root
+       must answer NOT_FOUND and force the adopt-by-GUID fallback. */
+    if(app_mode==APP_ESP_NO_ASSETS||app_mode==APP_PAYLOAD_RENUM||app_mode==APP_PAYLOAD_MULTI)return EFI_NOT_FOUND;
+    target=1;
+  }
+  else if((v->kind==9||v->kind==12) && !strcmp(path,"\\RTX4090-UNLOCK"))target=1;
   else if(v->kind==1 && !strncmp(path,"RUN",3)) {
     CHECK(!strcmp(path,"RUN00") || !strcmp(path,"RUN01") || !strcmp(path,"RUN02"));
     if(strcmp(path,"RUN02"))target=2;
@@ -460,8 +475,11 @@ static EFI_STATUS EFIAPI file_flush(EFI_FILE_PROTOCOL *f) {
   CHECK(((FILE_FAKE *)f)->open);return app_mode==APP_FLUSH?EFI_DEVICE_ERROR:EFI_SUCCESS;
 }
 static EFI_STATUS EFIAPI volume(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *p,EFI_FILE_PROTOCOL **root) {
-  CHECK(p==&fs || p==&windows_fs || p==&esp_only_fs);
-  int k=p==&fs?0:9;files[k].open=TRUE;*root=&files[k].protocol;return EFI_SUCCESS;
+  CHECK(p==&fs || p==&windows_fs || p==&esp_only_fs || p==&payload2_fs);
+  /* kind 0 = USB/ESP-boot root with the tree; kind 9 = Windows ESP (bootmgfw);
+     kind 12 = payload/extra FAT32 volumes (their own root so the adopted
+     payload root and the preload ESP root can be open at the same time). */
+  int k=p==&fs?0:(p==&esp_only_fs||p==&payload2_fs)?12:9;files[k].open=TRUE;*root=&files[k].protocol;return EFI_SUCCESS;
 }
 static EFI_STATUS EFIAPI locate_path(EFI_GUID *g,EFI_DEVICE_PATH_PROTOCOL **p,EFI_HANDLE *h) {
   CHECK(guid(g,&pg) && p && *p);*h=*p==(VOID*)intel_path?H(99):H(3);return EFI_SUCCESS;
@@ -519,6 +537,7 @@ static void app_setup(enum app_case mode) {
   payload_esp_path.hd.PartitionNumber=4;
   memcpy(&esp_only_path,&payload_esp_path,sizeof(esp_only_path));
   if(app_mode==APP_PAYLOAD_RENUM)esp_only_path.hd.PartitionNumber=3;
+  memcpy(&payload2_path,&payload_esp_path,sizeof(payload2_path));payload2_path.hd.PartitionNumber=6;
   memset(&st,0,sizeof(st));memset(&rt,0,sizeof(rt));memset(files,0,sizeof(files));memset(&loaded,0,sizeof(loaded));
   exclusive_calls=close_protocol_calls=key_calls=watchdog_calls=report_bytes=file_closes=0;
   query_calls=0;query_allocation=NULL;prom_dump_calls=0;
@@ -545,9 +564,9 @@ static void app_setup(enum app_case mode) {
   bs.RaiseTPL=raise_tpl;bs.RestoreTPL=restore_tpl;pci.GetLocation=location;pci.GetBarAttributes=bar_info;
   pci.Pci.Read=app_read_config;pci.Attributes=mode==APP_DECODE_NO_API?NULL:attributes;
   replacement_pci=pci;replacement_pci.Pci.Read=replacement_read;replacement_pci.Pci.Write=replacement_write;
-  loaded.DeviceHandle=H(2);fs.OpenVolume=volume;windows_fs.OpenVolume=volume;esp_only_fs.OpenVolume=volume;
+  loaded.DeviceHandle=H(2);fs.OpenVolume=volume;windows_fs.OpenVolume=volume;esp_only_fs.OpenVolume=volume;payload2_fs.OpenVolume=volume;
   pci.RomImage=prom;pci.RomSize=0x24a00;
-  for(int i=0;i<12;i++) {
+  for(int i=0;i<13;i++) {
     files[i].kind=i;files[i].protocol.Open=file_open;files[i].protocol.Close=file_close;
     files[i].protocol.GetInfo=file_info;files[i].protocol.Read=file_read;
     files[i].protocol.Write=file_write;files[i].protocol.Flush=file_flush;
@@ -594,7 +613,7 @@ int main(int argc,char **argv) {
     APP_HANDOFF_CONFIG,APP_HANDOFF_PROM,APP_HANDOFF_MISSING_PCI,APP_HANDOFF_REPLACED_PCI,APP_DIRTY,
     APP_SELECTOR,APP_UNMAP,APP_LOG_DIRTY,APP_FWSEC_NO_WPR,APP_MASTER_ENABLE_ERROR,APP_MASTER_DISABLE_ERROR,
     APP_HANDOFF_LOG,APP_CLOSE,APP_HANDOFF_CHILD,APP_HANDOFF_BAD_CHILD,APP_HANDOFF_OTHER_CHILD,
-    APP_ESP_BOOT,APP_ESP_WRONG_GUID,APP_PAYLOAD_BOOT,APP_ESP_NO_ASSETS,APP_PAYLOAD_RENUM};
+    APP_ESP_BOOT,APP_ESP_WRONG_GUID,APP_PAYLOAD_BOOT,APP_ESP_NO_ASSETS,APP_PAYLOAD_RENUM,APP_PAYLOAD_MULTI};
   const int injected[]={SUCCESS,SEC2_STUCK_HALT,SEC2_RUN_HALT,SEC2_RUN_TIMEOUT,
    SEC2_UNAVAILABLE,SEC2_DIAG_FAIL,SEC2_PROTECTED_DIAG,SEC2_STATUS_ERROR_PLM_OPEN,
    PLM_SECOND_TARGET_TIMEOUT,PLM_PRIOR_RELOCK,PLM_WRONG_WPR_CFG_MASK,
